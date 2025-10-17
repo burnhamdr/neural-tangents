@@ -919,9 +919,9 @@ def Dense(
       if ntk is not None:
         add = 0.0
         if _train_W:
-          add = add + (W_std ** 2) * nngp_in    # σ_w^2 K_y
+            add = add + (W_std ** 2) * nngp_in    # σ_w^2 K_y
         if _train_b and (b_std is not None):
-          add = add + (b_std ** 2)              # σ_b^2
+            add = add + (b_std ** 2)              # σ_b^2
         ntk = (W_std ** 2) * ntk + add          # σ_w^2 Θ_y + gated local terms
         
         # ntk = nngp + W_std**2 * ntk
