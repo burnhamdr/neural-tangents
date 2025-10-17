@@ -766,6 +766,7 @@ def Dense(
     batch_axis: int = 0,
     channel_axis: int = -1,
     parameterization: str = 'ntk',
+    trainable: tuple[str, ...] = ("W", "b"),  # NEW: select trainable params
     s: tuple[int, int] = (1, 1),
 ) -> InternalLayerMasked:
   r"""Dense (fully-connected, matrix product).
@@ -844,6 +845,11 @@ def Dense(
   # parameterization from "ntk" to "standard"
 
   parameterization = parameterization.lower()
+  trainable = tuple(trainable)
+  if any(t not in ("W", "b") for t in trainable):
+    raise ValueError(f'`trainable` must be a subset of {{"W","b"}}, got {trainable}.')
+  _train_W = "W" in trainable
+  _train_b = "b" in trainable
 
   def _init_fn(rng, input_shape, out_dim):
     _channel_axis = channel_axis % len(input_shape)
@@ -851,6 +857,7 @@ def Dense(
                     + input_shape[_channel_axis + 1:])
     rng1, rng2 = random.split(rng)
     W = random.normal(rng1, (input_shape[_channel_axis], out_dim))
+    W /= (input_shape[_channel_axis] / s[0])**0.5  # Scale by in_dim.
 
     if b_std is None:
       b = None
@@ -902,21 +909,37 @@ def Dense(
   def kernel_fn(k: Kernel, **kwargs):
     """Compute the transformed kernels after a `Dense` layer."""
     cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
-
+    nngp_in = nngp # cache the input nngp prior to affine transformation from the layer.
+    
     def fc(x):
       return _affine(x, W_std, b_std)
 
     if parameterization == 'ntk':
       cov1, nngp, cov2 = map(fc, (cov1, nngp, cov2))
       if ntk is not None:
-        ntk = nngp + W_std**2 * ntk
+        add = 0.0
+        if _train_W:
+          add = add + (W_std ** 2) * nngp_in    # σ_w^2 K_y
+        if _train_b and (b_std is not None):
+          add = add + (b_std ** 2)              # σ_b^2
+        ntk = (W_std ** 2) * ntk + add          # σ_w^2 Θ_y + gated local terms
+        
+        # ntk = nngp + W_std**2 * ntk
+        
     elif parameterization == 'standard':
       input_width = k.shape1[channel_axis] / s[0]
-      if ntk is not None:
-        ntk = input_width * nngp + W_std**2 * ntk
-        if b_std is not None:
-          ntk += 1.
+      # if ntk is not None:
+      #   ntk = input_width * nngp + W_std**2 * ntk
+      #   if b_std is not None:
+      #     ntk += 1.
       cov1, nngp, cov2 = map(fc, (cov1, nngp, cov2))
+      if ntk is not None:
+        new_ntk = (W_std ** 2) * ntk                 # propagate earlier Θ
+        if _train_W:
+          new_ntk = new_ntk + 2*input_width * nngp_in   # local W term
+        if _train_b:
+          new_ntk = new_ntk + 1.0                     # local b term
+        ntk = new_ntk
 
     return k.replace(cov1=cov1,
                      nngp=nngp,
