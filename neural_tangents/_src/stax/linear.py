@@ -936,9 +936,9 @@ def Dense(
       if ntk is not None:
         new_ntk = (W_std ** 2) * ntk                 # propagate earlier Θ
         if _train_W:
-          new_ntk = new_ntk + 2*input_width * nngp_in   # local W term
+          new_ntk = new_ntk + input_width * nngp_in   # local W term
         if _train_b:
-          new_ntk = new_ntk + 1.0                     # local b term
+          new_ntk = new_ntk + (b_std**2)                     # local b term
         ntk = new_ntk
 
     return k.replace(cov1=cov1,
