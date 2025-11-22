@@ -143,7 +143,7 @@ def plot_2d_kde_and_samples(centers, sigma, samples_per_gaussian=300, overlap=No
             bw = sigma / std_mean if std_mean > 0 else None
             kde = gaussian_kde(pts, bw_method=bw)
             zi = kde(grid_coords).reshape(xx.shape)
-            ax.contour(xx, yy, zi, levels=3, alpha=0.6, colors=[colors[i]])
+            ax.contour(xx, yy, zi, levels=2, alpha=0.6, colors=[colors[i]])
         except Exception:
             pass
         ax.scatter(pts[0], pts[1], s=6, color=colors[i], alpha=0.6, label=f'g{i}', edgecolors='none')
@@ -244,13 +244,13 @@ def plot_train_test_split(X_train, y_train, X_test, y_test, centers, title="Trai
     plt.tight_layout()
     plt.show()
 
-def demo_2d_examples(M=1.0, Ks=(9,16), overlaps=(0.2,0.6), samples_per_gaussian=300, random_state=0):
+def demo_2d_examples(M=1.0, Ks=(9,16), overlaps=(0.2,0.6), samples_per_gaussian=300, random_state=0, show=True):
     for K in Ks:
         for overlap in overlaps:
             centers = create_centers_grid(2, K, M, random_state=random_state)
             sigma = sigma_from_overlap(centers, overlap)
             print(f"Demo: K={K}, overlap={overlap} -> sigma={sigma:.4g}")
-            plot_2d_kde_and_samples(centers, sigma, samples_per_gaussian=samples_per_gaussian, overlap=overlap)
+            plot_2d_kde_and_samples(centers, sigma, samples_per_gaussian=samples_per_gaussian, overlap=overlap, show=show)
 
 def make_multitask_classification_datasets(
     data_dim,
@@ -386,3 +386,234 @@ def make_multitask_classification_datasets(
         })
 
     return datasets
+
+import numpy as np
+
+def make_orthogonal_multitask_regression_datasets(
+    num_tasks,
+    input_dim,
+    num_points_per_task,
+    sigma,
+    center_scale=10.0,
+    random_state=None
+):
+    """
+    Create a multitask regression dataset with *decoupled*
+    number of tasks and input dimension.
+
+    Task k:
+      X_k ~ N(center_k, sigma^2 I)
+      y_k = X_k @ w    (global readout vector)
+
+    centers live in R^{input_dim}, one per task.
+
+    Parameters
+    ----------
+    num_tasks : int
+        Number of tasks (clusters).
+    input_dim : int
+        Dimensionality of each sample x.
+    num_points_per_task : int
+        Samples per task.
+    sigma : float
+        Gaussian noise (isotropic).
+    center_scale : float
+        Separation scale for centers.
+    random_state : int or None
+        PRNG seed.
+
+    Returns
+    -------
+    tasks : list of dicts
+    info  : dict with analytics
+    """
+
+    assert num_tasks > 0
+    assert input_dim > 0
+
+    rng = np.random.default_rng(random_state)
+
+    # ------------------------------------------------------------
+    # 1. Construct orthogonal centers in R^{input_dim}
+    # ------------------------------------------------------------
+    if num_tasks > input_dim:
+        raise ValueError(
+            "num_tasks cannot exceed input_dim with strict orthogonal centers. "
+            "Increase input_dim or use random approximate orthogonal centers."
+        )
+
+    # Use first num_tasks standard basis vectors in R^{input_dim}
+    centers = np.zeros((num_tasks, input_dim))
+    for k in range(num_tasks):
+        centers[k, k] = center_scale
+
+    # Pairwise distances
+    diffs = centers[:, None, :] - centers[None, :, :]
+    pairwise_dists = np.linalg.norm(diffs, axis=-1)
+
+    # ------------------------------------------------------------
+    # 2. Global readout vector
+    # ------------------------------------------------------------
+    w = rng.normal(size=input_dim)
+    w /= np.linalg.norm(w)
+
+    # ------------------------------------------------------------
+    # 3. Generate tasks
+    # ------------------------------------------------------------
+    tasks = []
+    for k in range(num_tasks):
+
+        center_k = centers[k]
+
+        X = rng.normal(
+            loc=center_k,
+            scale=sigma,
+            size=(num_points_per_task, input_dim)
+        )
+
+        y = X @ w           # (N,)
+
+        tasks.append({
+            "X": X,
+            "y": y,
+            "center": center_k,
+            "sigma": sigma,
+            "readout_vector": w
+        })
+
+    info = {
+        "centers": centers,
+        "readout_vector": w,
+        "pairwise_dists": pairwise_dists,
+        "sigma": sigma,
+        "input_dim": input_dim,
+        "num_tasks": num_tasks,
+        "center_scale": center_scale
+    }
+
+    return tasks, info
+
+
+def make_multitask_regression_datasets(
+    data_dim,
+    num_tasks,
+    num_points_per_task,
+    dim_hypercube=2.0,
+    sigma=None,
+    overlap=None,
+    random_state=None,
+):
+    """
+    Multitask regression dataset where EACH TASK corresponds to one N-dim Gaussian.
+
+    Now:
+      - `sigma` (Gaussian std) can be specified directly (preferred).
+      - `overlap` is only used to *derive* sigma if sigma is None.
+      - Returns an `effective_overlap` = sigma / mean_nearest_neighbor_distance.
+
+    Parameters
+    ----------
+    data_dim : int
+        Dimension of input space.
+    num_tasks : int
+        Number of Gaussians (tasks).
+    num_points_per_task : int
+        Number of samples per task.
+    dim_hypercube : float
+        Centers lie in [0, dim_hypercube]^data_dim.
+    sigma : float or None
+        Standard deviation of each Gaussian. If provided, overrides `overlap`.
+    overlap : float or None
+        If sigma is None and overlap is provided, we set
+            sigma = overlap * mean_nearest_neighbor_distance
+    random_state : int or None
+        RNG seed.
+
+    Returns
+    -------
+    tasks : list of dict
+        Each dict has:
+          {
+            'X':       (num_points_per_task, data_dim),
+            'y':       (num_points_per_task, data_dim),
+            'center':  (data_dim,),
+            'sigma':   float
+          }
+
+    info : dict
+        {
+          'centers': centers,                     # (num_tasks, data_dim)
+          'sigma': sigma,
+          'mean_nn_dist': mean_nn_dist,
+          'effective_overlap': sigma / mean_nn_dist
+        }
+    """
+    rng = np.random.default_rng(random_state)
+
+    # ---------------------------------------------------------
+    # 1) Place centers in the hypercube
+    # ---------------------------------------------------------
+    centers = rng.uniform(
+        low=0.0,
+        high=dim_hypercube,
+        size=(num_tasks, data_dim)
+    )
+
+    # ---------------------------------------------------------
+    # 2) Compute characteristic spacing between centers
+    # ---------------------------------------------------------
+    if num_tasks > 1:
+        dists = np.linalg.norm(
+            centers[:, None, :] - centers[None, :, :],
+            axis=-1
+        )
+        np.fill_diagonal(dists, np.inf)
+        nn_dist = np.min(dists, axis=1)
+        mean_nn_dist = float(np.mean(nn_dist))
+    else:
+        mean_nn_dist = dim_hypercube  # arbitrary for single center
+
+    # ---------------------------------------------------------
+    # 3) Decide sigma
+    # ---------------------------------------------------------
+    if sigma is not None and overlap is not None:
+        raise ValueError("Specify either sigma OR overlap, not both.")
+
+    if sigma is None and overlap is None:
+        # sensible default: small-ish overlap
+        overlap = 0.2
+        sigma = overlap * mean_nn_dist
+    elif sigma is None and overlap is not None:
+        sigma = overlap * mean_nn_dist
+    # else: sigma is given directly
+
+    effective_overlap = sigma / mean_nn_dist if mean_nn_dist > 0 else np.nan
+
+    # ---------------------------------------------------------
+    # 4) Generate data for each task
+    # ---------------------------------------------------------
+    tasks = []
+
+    for k in range(num_tasks):
+        mean = centers[k]
+        X = rng.normal(loc=mean, scale=sigma, size=(num_points_per_task, data_dim))
+
+        # Regression target = mean (could add noise or transform if you want)
+        y = np.tile(mean, (num_points_per_task, 1))
+
+        tasks.append({
+            "X": X,
+            "y": y,
+            "center": mean,
+            "sigma": sigma
+        })
+
+    info = {
+        "centers": centers,
+        "sigma": sigma,
+        "mean_nn_dist": mean_nn_dist,
+        "effective_overlap": effective_overlap
+    }
+
+    return tasks, info
+
