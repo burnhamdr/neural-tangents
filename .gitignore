@@ -1,4 +1,10 @@
 *.pyc
 *.txt
+*.png
 PKG-INFO
 /multiTasking/results
+/presentation
+/multiTasking/figures
+/multiTasking/ICMNS_results
+/multiTasking/scripts/results
+/multiTasking/scripts/ridge_tuning_results

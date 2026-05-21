@@ -159,10 +159,11 @@ def generate_multi_tasks_from_normals_phases(
 # Closed-form spherical kernels
 # ----------------------------
 class KernelParams:
-    def __init__(self, sigma_w2=1.0, sigma_b2=1.0, sigma_v2=1.0):
+    def __init__(self, sigma_w2=1.0, sigma_b2=1.0, sigma_v2=1.0, sigma_bout2=1.0):
         self.sigma_w2 = float(sigma_w2)
         self.sigma_b2 = float(sigma_b2)
         self.sigma_v2 = float(sigma_v2)
+        self.sigma_bout2 = float(sigma_bout2)
 
 def _relu_kappa_components_sphere(t: jnp.ndarray, par: KernelParams):
     q = par.sigma_w2 + par.sigma_b2
@@ -177,9 +178,9 @@ def gram_from_kappa(Xa: jnp.ndarray, Xb: jnp.ndarray, par: KernelParams, which: 
     t = jnp.clip(Xa @ Xb.T, -1.0, 1.0)
     k0, k1 = _relu_kappa_components_sphere(t, par)
     if which == "full":
-        K = k0 + par.sigma_v2 * (t + 1.0) * k1
+        K = k0 + par.sigma_v2 * (t + 1.0) * k1 + par.sigma_bout2
     elif which == "bias":
-        K = par.sigma_v2 * k1
+        K = par.sigma_v2 * k1 + par.sigma_bout2
     else:
         raise ValueError("which must be 'full' or 'bias'")
     return K * float(kappa_scale)
@@ -331,14 +332,18 @@ def run_kernel_multi_great_circle(
     noise_std: float | None = None,    # overrides snr if provided
     noise_on: str = "both",            # "train", "test", "both"
     compute_spectrum: bool = False,
+    compute_testA: bool = True,
+    compute_testB: bool = True,
 ):
     """
-    Returns per-task MSEs on TWO independent test replicates (A,B),
-    plus seed-level aggregates for baseline repeatability and model-baseline gap.
+    Returns per-task MSEs on the requested independent test replicates (A, B).
 
-    Baseline repeatability is estimated by comparing baseline MSE on test A vs test B.
-    Model-baseline gap is |MSE_model - MSE_base| / MSE_base on replicate A (and also B).
+    Replicate A is intended for hyperparameter selection / validation.
+    Replicate B is intended for final reporting.
     """
+    if not (compute_testA or compute_testB):
+        raise ValueError("At least one of compute_testA or compute_testB must be True.")
+
     rng = np.random.default_rng(seed)
     if test_pts_per_circle is None:
         test_pts_per_circle = 2 * pts_per_circle
@@ -373,11 +378,18 @@ def run_kernel_multi_great_circle(
     # ----------------------------
     # Test replicate A/B: independent random sampling of phi
     # ----------------------------
-    rngA = np.random.default_rng(seed + 10_000_001)
-
-    X_testA_np, y_testA_np, task_slices_testA = generate_multi_tasks_from_normals_phases_with_mode(
-        normals_te, phases_te, pts_per_circle=test_pts_per_circle, m=m, rng=rngA, mode="random"
-    )
+    X_testA_np = y_testA_np = task_slices_testA = None
+    X_testB_np = y_testB_np = task_slices_testB = None
+    if compute_testA:
+        rngA = np.random.default_rng(seed + 10_000_001)
+        X_testA_np, y_testA_np, task_slices_testA = generate_multi_tasks_from_normals_phases_with_mode(
+            normals_te, phases_te, pts_per_circle=test_pts_per_circle, m=m, rng=rngA, mode="random"
+        )
+    if compute_testB:
+        rngB = np.random.default_rng(seed + 10_000_002)
+        X_testB_np, y_testB_np, task_slices_testB = generate_multi_tasks_from_normals_phases_with_mode(
+            normals_te, phases_te, pts_per_circle=test_pts_per_circle, m=m, rng=rngB, mode="random"
+        )
     
     # ----------------------------
     # Optional: additive Gaussian label noise (SNR control)
@@ -396,22 +408,33 @@ def run_kernel_multi_great_circle(
             y_train_np = y_train_np + rngN.normal(0.0, noise_std, size=y_train_np.shape)
 
         if noise_on in ("test", "both"):
-            # independent noise stream for test
-            rngNt = np.random.default_rng(seed + 30_000_000)
-            y_testA_np = y_testA_np + rngNt.normal(0.0, noise_std, size=y_testA_np.shape)
+            if compute_testA:
+                rngNtA = np.random.default_rng(seed + 30_000_001)
+                y_testA_np = y_testA_np + rngNtA.normal(0.0, noise_std, size=y_testA_np.shape)
+            if compute_testB:
+                rngNtB = np.random.default_rng(seed + 30_000_002)
+                y_testB_np = y_testB_np + rngNtB.normal(0.0, noise_std, size=y_testB_np.shape)
 
     X_train = jnp.array(X_train_np, dtype=jnp.float32)
     y_train = jnp.array(y_train_np, dtype=jnp.float32).reshape(-1, 1)
 
-    X_testA = jnp.array(X_testA_np, dtype=jnp.float32)
-    y_testA = jnp.array(y_testA_np, dtype=jnp.float32).reshape(-1, 1)
+    X_testA = y_testA = None
+    X_testB = y_testB = None
+    if compute_testA:
+        X_testA = jnp.array(X_testA_np, dtype=jnp.float32)
+        y_testA = jnp.array(y_testA_np, dtype=jnp.float32).reshape(-1, 1)
+    if compute_testB:
+        X_testB = jnp.array(X_testB_np, dtype=jnp.float32)
+        y_testB = jnp.array(y_testB_np, dtype=jnp.float32).reshape(-1, 1)
 
     # ----------------------------
     # Kernels
     # ----------------------------
     if backend == "nt":
         K_train = gram_from_neural_tangents(X_train, X_train, which=which, W_std=W_std, b_std=b_std)
-        K_A_train = gram_from_neural_tangents(X_testA, X_train, which=which, W_std=W_std, b_std=b_std)
+
+        def cross_kernel_fn(X_chunk):
+            return gram_from_neural_tangents(X_chunk, X_train, which=which, W_std=W_std, b_std=b_std)
 
     elif backend == "kappa":
         if kappa_params is None:
@@ -424,7 +447,9 @@ def run_kernel_multi_great_circle(
         kappa_kernel_fn = nt.batch(kappa_kernel_fn, device_count=-1)
 
         K_train = jnp.array(kappa_kernel_fn(X_train, X_train, get="ntk"))
-        K_A_train = jnp.array(kappa_kernel_fn(X_testA, X_train, get="ntk"))
+
+        def cross_kernel_fn(X_chunk):
+            return jnp.array(kappa_kernel_fn(X_chunk, X_train, get="ntk"))
     else:
         raise ValueError("backend must be 'nt' or 'kappa'")
 
@@ -442,35 +467,74 @@ def run_kernel_multi_great_circle(
     
     if compute_spectrum:
         eigvals = jnp.linalg.eigvalsh(K_train)
-        print(eigvals.shape)
+        # print(eigvals.shape)
+
+    def predict_in_chunks(X_test, max_kernel_mb: int = 256):
+        """
+        Evaluate K(X_test, X_train) @ alpha without materializing the full
+        test-train kernel matrix, which can exceed device memory for small T.
+        """
+        bytes_per_entry = np.dtype(np.float32).itemsize
+        target_entries = max(1, (max_kernel_mb * 1024 * 1024) // bytes_per_entry)
+        chunk_size = max(1, int(target_entries // max(1, n)))
+        preds = []
+        for start in range(0, X_test.shape[0], chunk_size):
+            stop = min(start + chunk_size, X_test.shape[0])
+            X_chunk = X_test[start:stop]
+            K_chunk = cross_kernel_fn(X_chunk) / s_trace
+            y_chunk = K_chunk @ alpha
+            preds.append(np.asarray(y_chunk).reshape(-1))
+        return np.concatenate(preds, axis=0)
 
     # Predictions on A/B
-    y_predA = K_A_train @ alpha
-
-    y_predA_np = np.asarray(y_predA).reshape(-1)
-    y_testA_np_flat = np.asarray(y_testA).reshape(-1)
+    y_predA_np = y_testA_np_flat = None
+    y_predB_np = y_testB_np_flat = None
+    if compute_testA:
+        y_predA_np = predict_in_chunks(X_testA)
+        y_testA_np_flat = np.asarray(y_testA).reshape(-1)
+    if compute_testB:
+        y_predB_np = predict_in_chunks(X_testB)
+        y_testB_np_flat = np.asarray(y_testB).reshape(-1)
 
     # ----------------------------
     # Per-task MSEs and baselines on both replicates
     # ----------------------------
-    mse_model_A, mse_base_A = [], []
+    mse_model_A, mse_base_A = None, None
+    mse_model_B, mse_base_B = None, None
+    if compute_testA:
+        mse_model_A, mse_base_A = [], []
+    if compute_testB:
+        mse_model_B, mse_base_B = [], []
 
-    for sl_tr, sl_A in zip(task_slices_train, task_slices_testA):
+    for task_idx, sl_tr in enumerate(task_slices_train):
         # baseline constant fitted on TRAIN for that task
         c = float(np.mean(y_train_np_clean[sl_tr]))
-        # replicate A
-        ytA = y_testA_np_flat[sl_A]
-        ypA = y_predA_np[sl_A]
-        mse_model_A.append(float(np.mean((ytA - ypA) ** 2)))
-        mse_base_A.append(float(np.mean((ytA - c) ** 2)))
+        if compute_testA:
+            sl_A = task_slices_testA[task_idx]
+            ytA = y_testA_np_flat[sl_A]
+            ypA = y_predA_np[sl_A]
+            mse_model_A.append(float(np.mean((ytA - ypA) ** 2)))
+            mse_base_A.append(float(np.mean((ytA - c) ** 2)))
+        if compute_testB:
+            sl_B = task_slices_testB[task_idx]
+            ytB = y_testB_np_flat[sl_B]
+            ypB = y_predB_np[sl_B]
+            mse_model_B.append(float(np.mean((ytB - ypB) ** 2)))
+            mse_base_B.append(float(np.mean((ytB - c) ** 2)))
 
-    mse_model_A = np.array(mse_model_A)
-    mse_base_A  = np.array(mse_base_A)
+    if compute_testA:
+        mse_model_A = np.array(mse_model_A)
+        mse_base_A  = np.array(mse_base_A)
+    if compute_testB:
+        mse_model_B = np.array(mse_model_B)
+        mse_base_B  = np.array(mse_base_B)
 
 
     return dict(
         mse_model_A=mse_model_A,
         mse_base_A=mse_base_A,
+        mse_model_B=mse_model_B,
+        mse_base_B=mse_base_B,
         # metadata
         generalization=generalization,
         backend=backend,
@@ -511,7 +575,10 @@ def calibrate_kappa_scale(
     return num / den
 
 import numpy as np
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
 from tqdm.auto import tqdm
 
 
@@ -591,7 +658,22 @@ def make_effective_capacity_panels(
     n_perm: int = 5000,
     bh_correct: bool = True,
     compute_spectrum: bool = False,
+    selection_split: str = "A",
+    report_split: str | None = "B",
 ):
+    valid_splits = {"A", "B"}
+    if selection_split not in valid_splits:
+        raise ValueError("selection_split must be 'A' or 'B'.")
+    if report_split is not None and report_split not in valid_splits:
+        raise ValueError("report_split must be None, 'A', or 'B'.")
+
+    need_testA = selection_split == "A" or report_split == "A"
+    need_testB = selection_split == "B" or report_split == "B"
+    summary_split = report_split if report_split is not None else selection_split
+
+    def _empty_metric_array():
+        return np.full(len(T_list), np.nan, dtype=float)
+
     kernels = {
         "full_ntk": dict(which="full"),
         "bias_only": dict(which="bias"),
@@ -603,8 +685,12 @@ def make_effective_capacity_panels(
     for kname, kcfg in kernels.items():
         if show_seed_progress:
             print(f"Running kernel variant: {kname}\n")
-        nmse_means, nmse_sems = [], []
-        mse_means, mse_sems = [], []
+        nmse_means_A, nmse_sems_A = [], []
+        mse_means_A, mse_sems_A = [], []
+        base_means_A, base_sems_A = [], []
+        nmse_means_B, nmse_sems_B = [], []
+        mse_means_B, mse_sems_B = [], []
+        base_means_B, base_sems_B = [], []
         improv_medians = []
         #check if reg_scale dict points to a list
         if isinstance(reg_scale[kname], list):
@@ -622,9 +708,13 @@ def make_effective_capacity_panels(
         T_arr = np.asarray(T_list, dtype=int)
         max_T = int(np.max(T_arr))
         for T in T_list:
-            seed_level_deltas = []   # for your existing sign-flip test (base - model)
-            seed_level_nmse = []
-            seed_level_mse = []
+            seed_level_deltas = []   # evaluated on the summary split used for reporting
+            seed_level_nmse_A = []
+            seed_level_mse_A = []
+            seed_level_base_A = []
+            seed_level_nmse_B = []
+            seed_level_mse_B = []
+            seed_level_base_B = []
             seed_level_improv_med = []
             if compute_spectrum:    
                 seed_level_eigs = []
@@ -658,45 +748,74 @@ def make_effective_capacity_panels(
                     snr=snr,
                     noise_std=noise_std,
                     noise_on=noise_on,
-                    compute_spectrum=compute_spectrum
+                    compute_spectrum=compute_spectrum,
+                    compute_testA=need_testA,
+                    compute_testB=need_testB,
                 )
                 if compute_spectrum:
                     seed_level_eigs.append(out["eigvals"])
 
-                mse_model = out["mse_model_A"]
-                mse_base  = out["mse_base_A"]
-                noise_std = out["noise_std_used"]
+                mse_model_A = out["mse_model_A"]
+                mse_base_A  = out["mse_base_A"]
+                mse_model_B = out["mse_model_B"]
+                mse_base_B  = out["mse_base_B"]
+                noise_std_used = out["noise_std_used"]
                 # --- Option A: subtract test noise floor (excess MSE) ---
                 # Only subtract if you actually injected noise into the TEST labels.
                 if (noise_std is not None or snr is not None) and (noise_on in ("test", "both")):
                     # Recover the actual noise_std used in the run
                     # Best: have run_kernel_multi_great_circle return noise_std_used.
                     # If not, recompute it the same way as in run_kernel_multi_great_circle:
-                    if noise_std is None and snr is not None:
+                    if noise_std_used is None and snr is not None:
                         # This is slightly risky to recompute here unless you return it.
                         # Prefer returning noise_std_used from run_kernel_multi_great_circle.
                         raise RuntimeError("Return noise_std_used from run_kernel_multi_great_circle for correctness.")
                     
-                    noise_var = float(noise_std)**2
+                    noise_var = float(noise_std_used)**2
 
-                    mse_model_excess = np.maximum(mse_model - noise_var, 0.0)
-                    mse_base_excess  = np.maximum(mse_base  - noise_var, 0.0)
+                    if mse_model_A is not None:
+                        mse_model_A_excess = np.maximum(mse_model_A - noise_var, 0.0)
+                        mse_base_A_excess  = np.maximum(mse_base_A  - noise_var, 0.0)
+                    else:
+                        mse_model_A_excess = None
+                        mse_base_A_excess = None
+                    if mse_model_B is not None:
+                        mse_model_B_excess = np.maximum(mse_model_B - noise_var, 0.0)
+                        mse_base_B_excess  = np.maximum(mse_base_B  - noise_var, 0.0)
+                    else:
+                        mse_model_B_excess = None
+                        mse_base_B_excess = None
                 else:
-                    mse_model_excess = mse_model
-                    mse_base_excess  = mse_base
+                    mse_model_A_excess = mse_model_A
+                    mse_base_A_excess  = mse_base_A
+                    mse_model_B_excess = mse_model_B
+                    mse_base_B_excess  = mse_base_B
 
-                deltas_tasks = mse_base_excess - mse_model_excess
-
-                # task-wise paired deltas
-                deltas_tasks = np.asarray(mse_base_excess) - np.asarray(mse_model_excess)
+                if summary_split == "A":
+                    deltas_tasks = np.asarray(mse_base_A_excess) - np.asarray(mse_model_A_excess)
+                else:
+                    deltas_tasks = np.asarray(mse_base_B_excess) - np.asarray(mse_model_B_excess)
                 seed_level_deltas.append(deltas_tasks)
                 
-                seed_level_mse.append(float(np.mean(mse_model)))
+                if mse_model_A is not None:
+                    seed_level_mse_A.append(float(np.mean(mse_model_A)))
+                    seed_level_base_A.append(float(np.mean(mse_base_A)))
+                if mse_model_B is not None:
+                    seed_level_mse_B.append(float(np.mean(mse_model_B)))
+                    seed_level_base_B.append(float(np.mean(mse_base_B)))
 
-                nmse_tasks = mse_model / np.maximum(mse_base, 1e-12)
-                seed_level_nmse.append(float(np.mean(nmse_tasks)))
+                if mse_model_A is not None:
+                    nmse_tasks_A = mse_model_A / np.maximum(mse_base_A, 1e-12)
+                    seed_level_nmse_A.append(float(np.mean(nmse_tasks_A)))
+                else:
+                    nmse_tasks_A = None
+                if mse_model_B is not None:
+                    nmse_tasks_B = mse_model_B / np.maximum(mse_base_B, 1e-12)
+                    seed_level_nmse_B.append(float(np.mean(nmse_tasks_B)))
+                else:
+                    nmse_tasks_B = None
 
-                rel_improv_tasks = 1.0 - nmse_tasks
+                rel_improv_tasks = 1.0 - (nmse_tasks_A if summary_split == "A" else nmse_tasks_B)
                 seed_level_improv_med.append(float(np.median(rel_improv_tasks)))
             
             if compute_spectrum:
@@ -712,14 +831,34 @@ def make_effective_capacity_panels(
                 pvals.append(p_val)
                 pvals_w.append((p_val_w, wstat))
             
-            seed_level_nmse = np.asarray(seed_level_nmse, dtype=float)
+            if seed_level_nmse_A:
+                seed_level_nmse_A = np.asarray(seed_level_nmse_A, dtype=float)
+                seed_level_mse_A = np.asarray(seed_level_mse_A, dtype=float)
+                seed_level_base_A = np.asarray(seed_level_base_A, dtype=float)
+            else:
+                seed_level_nmse_A = seed_level_mse_A = seed_level_base_A = None
+            if seed_level_nmse_B:
+                seed_level_nmse_B = np.asarray(seed_level_nmse_B, dtype=float)
+                seed_level_mse_B = np.asarray(seed_level_mse_B, dtype=float)
+                seed_level_base_B = np.asarray(seed_level_base_B, dtype=float)
+            else:
+                seed_level_nmse_B = seed_level_mse_B = seed_level_base_B = None
             seed_level_improv_med = np.asarray(seed_level_improv_med, dtype=float)
-            seed_level_mse = np.asarray(seed_level_mse, dtype=float)
 
-            nmse_means.append(float(np.mean(seed_level_nmse)))
-            nmse_sems.append(float(np.std(seed_level_nmse, ddof=1) / (np.sqrt(n_seeds) + 1e-12)))
-            mse_means.append(float(np.mean(seed_level_mse)))
-            mse_sems.append(float(np.std(seed_level_mse, ddof=1) / (np.sqrt(n_seeds) + 1e-12)))
+            if seed_level_nmse_A is not None:
+                nmse_means_A.append(float(np.mean(seed_level_nmse_A)))
+                nmse_sems_A.append(float(np.std(seed_level_nmse_A, ddof=1) / (np.sqrt(n_seeds) + 1e-12)))
+                mse_means_A.append(float(np.mean(seed_level_mse_A)))
+                mse_sems_A.append(float(np.std(seed_level_mse_A, ddof=1) / (np.sqrt(n_seeds) + 1e-12)))
+                base_means_A.append(float(np.mean(seed_level_base_A)))
+                base_sems_A.append(float(np.std(seed_level_base_A, ddof=1) / (np.sqrt(n_seeds) + 1e-12)))
+            if seed_level_nmse_B is not None:
+                nmse_means_B.append(float(np.mean(seed_level_nmse_B)))
+                nmse_sems_B.append(float(np.std(seed_level_nmse_B, ddof=1) / (np.sqrt(n_seeds) + 1e-12)))
+                mse_means_B.append(float(np.mean(seed_level_mse_B)))
+                mse_sems_B.append(float(np.std(seed_level_mse_B, ddof=1) / (np.sqrt(n_seeds) + 1e-12)))
+                base_means_B.append(float(np.mean(seed_level_base_B)))
+                base_sems_B.append(float(np.std(seed_level_base_B, ddof=1) / (np.sqrt(n_seeds) + 1e-12)))
             improv_medians.append(float(np.median(seed_level_improv_med)))
 
         if compute_spectrum:
@@ -732,11 +871,47 @@ def make_effective_capacity_panels(
             eigs = np.asarray(eigs, dtype=float)
         
         
+        nmse_mean_A_arr = np.asarray(nmse_means_A, dtype=float) if nmse_means_A else _empty_metric_array()
+        nmse_sem_A_arr = np.asarray(nmse_sems_A, dtype=float) if nmse_sems_A else _empty_metric_array()
+        mse_mean_A_arr = np.asarray(mse_means_A, dtype=float) if mse_means_A else _empty_metric_array()
+        mse_sem_A_arr = np.asarray(mse_sems_A, dtype=float) if mse_sems_A else _empty_metric_array()
+        base_mean_A_arr = np.asarray(base_means_A, dtype=float) if base_means_A else _empty_metric_array()
+        base_sem_A_arr = np.asarray(base_sems_A, dtype=float) if base_sems_A else _empty_metric_array()
+        nmse_mean_B_arr = np.asarray(nmse_means_B, dtype=float) if nmse_means_B else _empty_metric_array()
+        nmse_sem_B_arr = np.asarray(nmse_sems_B, dtype=float) if nmse_sems_B else _empty_metric_array()
+        mse_mean_B_arr = np.asarray(mse_means_B, dtype=float) if mse_means_B else _empty_metric_array()
+        mse_sem_B_arr = np.asarray(mse_sems_B, dtype=float) if mse_sems_B else _empty_metric_array()
+        base_mean_B_arr = np.asarray(base_means_B, dtype=float) if base_means_B else _empty_metric_array()
+        base_sem_B_arr = np.asarray(base_sems_B, dtype=float) if base_sems_B else _empty_metric_array()
+
+        if summary_split == "A":
+            nmse_mean_arr, nmse_sem_arr = nmse_mean_A_arr, nmse_sem_A_arr
+            mse_mean_arr, mse_sem_arr = mse_mean_A_arr, mse_sem_A_arr
+            base_mean_arr, base_sem_arr = base_mean_A_arr, base_sem_A_arr
+        else:
+            nmse_mean_arr, nmse_sem_arr = nmse_mean_B_arr, nmse_sem_B_arr
+            mse_mean_arr, mse_sem_arr = mse_mean_B_arr, mse_sem_B_arr
+            base_mean_arr, base_sem_arr = base_mean_B_arr, base_sem_B_arr
+
         results[kname] = dict(
-                nmse_mean=np.asarray(nmse_means),
-                nmse_sem=np.asarray(nmse_sems),
-                mse_mean=np.asarray(mse_means),
-                mse_sem=np.asarray(mse_sems),
+                nmse_mean=nmse_mean_arr,
+                nmse_sem=nmse_sem_arr,
+                mse_mean=mse_mean_arr,
+                mse_sem=mse_sem_arr,
+                base_mean=base_mean_arr,
+                base_sem=base_sem_arr,
+                nmse_mean_A=nmse_mean_A_arr,
+                nmse_sem_A=nmse_sem_A_arr,
+                mse_mean_A=mse_mean_A_arr,
+                mse_sem_A=mse_sem_A_arr,
+                base_mean_A=base_mean_A_arr,
+                base_sem_A=base_sem_A_arr,
+                nmse_mean_B=nmse_mean_B_arr,
+                nmse_sem_B=nmse_sem_B_arr,
+                mse_mean_B=mse_mean_B_arr,
+                mse_sem_B=mse_sem_B_arr,
+                base_mean_B=base_mean_B_arr,
+                base_sem_B=base_sem_B_arr,
                 improv_median=np.asarray(improv_medians),
                 eigvals=eigs if compute_spectrum else None,
                 T_list=T_arr,

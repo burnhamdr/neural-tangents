@@ -19,8 +19,8 @@ def main():
     # ----------------------------
     # Load ridge tuning results (per-T lambda*)
     # ----------------------------
-    addn_save_str = "eigen_spectra_multitask"
-    addn_ridge_str = "cntrl_tot_pts"
+    addn_save_str = "eigen_spectra_multitask_cntrl_tot_pts_out_bias_valset_64ppt"
+    addn_ridge_str = "cntrl_tot_pts_out_bias_valset_64ppt"
     ridge_path = f"/home/dburnham/Documents/NTK/neural-tangents/multiTasking/results/ridge_tuning_results/ridge_tuning_by_T_{addn_ridge_str}.npz"
     if not os.path.exists(ridge_path):
         raise FileNotFoundError(f"Could not find: {ridge_path}")
@@ -35,7 +35,7 @@ def main():
     # ----------------------------
     # New sweep settings
     # ----------------------------
-    T_list = [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
+    T_list = [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 50]#, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
 
     # Interpolate lambda*(T) onto the new T_list
     lam_full = interpolate_lambda_star(T_list=T_list_ridge, lam_star=lam_star_full, T_new=T_list, clip=True)
@@ -52,15 +52,17 @@ def main():
     # ----------------------------
     backend = "kappa"         # "kappa" or "nt"
     generalization = "within" # "within" or "across"
+    normals_mode = "fibonacci"
+    random_phase = True
     W_std = 1.0
     b_std = 1.0
 
-    par = KernelParams(sigma_w2=W_std**2, sigma_b2=b_std**2, sigma_v2=1.0)
+    par = KernelParams(sigma_w2=W_std**2, sigma_b2=b_std**2, sigma_v2=1.0, sigma_bout2=1.0)
     kappa_scale = 1.0  # keep 1.0 unless you decide to calibrate
 
     # Experiment sizes
-    n_seeds = 1
-    pts_per_circle = 128
+    n_seeds = 20
+    pts_per_circle = 64
     cntrl_pts_per_task = True
     test_pts_per_circle = None  # defaults to 2*pts_per_circle inside runner
     m = 4
@@ -82,6 +84,8 @@ def main():
         T_list=T_list,
         backend=backend,
         generalization=generalization,
+        normals_mode=normals_mode,
+        random_phase=random_phase,
         n_seeds=n_seeds,
         pts_per_circle=pts_per_circle,
         cntrl_pts_per_task=cntrl_pts_per_task,
@@ -95,6 +99,8 @@ def main():
             full_ntk=reg_scale["full_ntk"],
             bias_only=reg_scale["bias_only"],
         ),
+        ridge_selection_split="A",
+        ridge_report_split=None,
         noise_on=None,
         compute_spectrum=compute_spectrum,
     )
@@ -117,10 +123,14 @@ def main():
                                         reg_scale = reg_scale,
                                         backend = backend,
                                         generalization = generalization,
+                                        normals_mode = normals_mode,
+                                        random_phase = random_phase,
                                         kappa_params=par,
                                         kappa_scale = kappa_scale,
                                         show_seed_progress = False,
                                         plot = False,
+                                        selection_split = "A",
+                                        report_split = None,
                                         # NEW: stats controls
                                         alpha = alpha,
                                         compute_spectrum = compute_spectrum,

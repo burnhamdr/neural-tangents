@@ -19,8 +19,8 @@ def main():
     # ----------------------------
     # Load ridge tuning results (per-T lambda*)
     # ----------------------------
-    addn_save_str = "test"
-    addn_ridge_str = "cntrl_tot_pts"
+    addn_save_str = "cntrl_tot_pts_out_bias"#"test"
+    addn_ridge_str = 'cntrl_tot_pts_out_bias'#"cntrl_tot_pts"
     ridge_path = f"/home/dburnham/Documents/NTK/neural-tangents/multiTasking/results/ridge_tuning_results/ridge_tuning_by_T_{addn_ridge_str}.npz"
     if not os.path.exists(ridge_path):
         raise FileNotFoundError(f"Could not find: {ridge_path}")
@@ -35,7 +35,7 @@ def main():
     # ----------------------------
     # New sweep settings
     # ----------------------------
-    T_list = [1]#, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
+    T_list = [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 50]#, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100
 
     # Interpolate lambda*(T) onto the new T_list
     lam_full = interpolate_lambda_star(T_list=T_list_ridge, lam_star=lam_star_full, T_new=T_list, clip=True)
@@ -55,7 +55,7 @@ def main():
     W_std = 1.0
     b_std = 1.0
 
-    par = KernelParams(sigma_w2=W_std**2, sigma_b2=b_std**2, sigma_v2=1.0)
+    par = KernelParams(sigma_w2=W_std**2, sigma_b2=b_std**2, sigma_v2=1.0, sigma_bout2=1.0)
     kappa_scale = 1.0  # keep 1.0 unless you decide to calibrate
 
     # ----------------------------
@@ -66,7 +66,7 @@ def main():
     noise_on = "both"  # "train", "test", "both"
 
     # Experiment sizes
-    n_seeds = 1
+    n_seeds = 20
     pts_per_circle = 128
     cntrl_pts_per_task = True
     test_pts_per_circle = None  # defaults to 2*pts_per_circle inside runner
@@ -127,7 +127,7 @@ def main():
         m=m,
         backend=backend,
         generalization=generalization,
-        normals_mode="random",
+        normals_mode="fibonacci",
         random_phase=True,
         W_std=W_std,
         b_std=b_std,
